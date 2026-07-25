@@ -1,0 +1,36 @@
+{
+  "name": "agentfocus-vscode",
+  "displayName": "AgentFocus VS Code Extension",
+  "description": "Focus exact integrated terminal tab on agent notifications",
+  "version": "1.0.0",
+  "publisher": "moonshot",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentfocus.focusTerminal",
+        "title": "AgentFocus: Focus Terminal",
+        "category": "AgentFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "18.x",
+    "typescript": "^5.1.3"
+  }
+}
