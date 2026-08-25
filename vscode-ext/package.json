@@ -1,8 +1,8 @@
 {
   "name": "agentfocus-vscode",
-  "displayName": "AgentFocus VS Code Extension",
-  "description": "Focus exact integrated terminal tab on agent notifications",
-  "version": "1.0.0",
+  "displayName": "AgentFocus",
+  "description": "Focus the exact integrated terminal tab for agentfocus (env-identity: AGENTFOCUS_VSCODE_ID)",
+  "version": "1.1.0",
   "publisher": "moonshot",
   "engines": {
     "vscode": "^1.80.0"
@@ -18,7 +18,12 @@
     "commands": [
       {
         "command": "agentfocus.focusTerminal",
-        "title": "AgentFocus: Focus Terminal",
+        "title": "Focus Terminal (from last request)",
+        "category": "AgentFocus"
+      },
+      {
+        "command": "agentfocus.debugListTerminals",
+        "title": "Debug: List mapped terminal IDs",
         "category": "AgentFocus"
       }
     ]

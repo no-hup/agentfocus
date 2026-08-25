@@ -2,99 +2,250 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { execSync } from 'child_process';
+import * as crypto from 'crypto';
 
-const APP_NAME = 'agentfocus';
-const CACHE_DIR = path.join(os.homedir(), '.cache', APP_NAME);
+/**
+ * AgentFocus VS Code / Cursor / Windsurf / VSCodium companion.
+ *
+ * Identity model (env, not pid-guessing):
+ *  - We assign each terminal a stable AGENTFOCUS_VSCODE_ID via
+ *    EnvironmentVariableCollection (rotation pattern: value set before
+ *    shell start is what that terminal inherits).
+ *  - Detached agent hooks inherit that env (validated).
+ *  - agy's vscode adapter writes ~/.cache/agentfocus/focus-request.json
+ *    { session_id, identity_handle }; we focus the matching terminal only.
+ *  - On no match: do NOTHING (never terminal[0]).
+ */
 
-export function activate(context: vscode.ExtensionContext) {
-    if (!fs.existsSync(CACHE_DIR)) {
-        fs.mkdirSync(CACHE_DIR, { recursive: true, mode: 0o700 });
+const APP = 'agentfocus';
+const ENV_KEY = 'AGENTFOCUS_VSCODE_ID';
+const CACHE_DIR = path.join(os.homedir(), '.cache', APP);
+const FOCUS_REQUEST = path.join(CACHE_DIR, 'focus-request.json');
+const LAST_FOCUS = '/tmp/agentfocus-last-focus.json';
+
+/** identity_handle → live terminal */
+const terminalsById = new Map<string, vscode.Terminal>();
+/** weak reverse map for cleanup */
+const idByTerminal = new Map<vscode.Terminal, string>();
+
+let nextId: string = newId();
+let envCollection: vscode.GlobalEnvironmentVariableCollection | undefined;
+let lastHandledMtime = 0;
+let lastHandledPayload = '';
+
+function newId(): string {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+function tsNow(): string {
+  // Avoid Date.now-only paths that some sandboxes block; ISO is fine in extension host.
+  return new Date().toISOString();
+}
+
+function ensureCacheDir(): void {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true, mode: 0o700 });
+  } catch {
+    /* ignore */
+  }
+}
+
+function primeEnvCollection(collection: vscode.GlobalEnvironmentVariableCollection): void {
+  // Only touch OUR key — never collection.clear() (would drop our other mutators;
+  // other extensions have separate collections and are not clobbered either way).
+  collection.persistent = false;
+  collection.replace(ENV_KEY, nextId);
+  envCollection = collection;
+}
+
+function rememberTerminal(term: vscode.Terminal, id: string): void {
+  terminalsById.set(id, term);
+  idByTerminal.set(term, id);
+}
+
+function forgetTerminal(term: vscode.Terminal): void {
+  const id = idByTerminal.get(term);
+  if (id) {
+    terminalsById.delete(id);
+    idByTerminal.delete(term);
+  }
+}
+
+/**
+ * Rotate AGENTFOCUS_VSCODE_ID so the *next* terminal gets a fresh value.
+ * The terminal that just opened should have inherited the previous nextId.
+ */
+function onTerminalOpened(term: vscode.Terminal): void {
+  const idForThis = nextId;
+  rememberTerminal(term, idForThis);
+  nextId = newId();
+  try {
+    envCollection?.replace(ENV_KEY, nextId);
+  } catch (e) {
+    console.error('[agentfocus] env replace failed', e);
+  }
+}
+
+function writeLastFocus(sessionId: string, terminalId: string): void {
+  const payload = {
+    session_id: sessionId,
+    terminalId,
+    ts: tsNow(),
+    ok: true,
+  };
+  try {
+    fs.writeFileSync(LAST_FOCUS, JSON.stringify(payload) + '\n', { encoding: 'utf8' });
+  } catch (e) {
+    console.error('[agentfocus] write last-focus failed', e);
+  }
+}
+
+function focusTerminal(
+  term: vscode.Terminal,
+  sessionId: string,
+  identityHandle: string,
+  showToast: boolean
+): void {
+  term.show(true);
+  writeLastFocus(sessionId, identityHandle);
+
+  if (showToast) {
+    const action = 'Focus Terminal';
+    void vscode.window
+      .showInformationMessage(`AgentFocus: session ${sessionId} needs attention`, action)
+      .then((sel) => {
+        if (sel === action) {
+          term.show(true);
+          writeLastFocus(sessionId, identityHandle);
+        }
+      });
+  }
+}
+
+interface FocusRequest {
+  session_id?: string;
+  identity_handle?: string;
+  title?: string;
+  message?: string;
+}
+
+function readFocusRequest(): FocusRequest | null {
+  try {
+    const st = fs.statSync(FOCUS_REQUEST);
+    const raw = fs.readFileSync(FOCUS_REQUEST, 'utf8');
+    // Dedup: same mtime+content
+    if (st.mtimeMs === lastHandledMtime && raw === lastHandledPayload) {
+      return null;
     }
-
-    let debounceTimer: NodeJS.Timeout | null = null;
-    let watcher: fs.FSWatcher;
-    
+    let data: FocusRequest;
     try {
-        watcher = fs.watch(CACHE_DIR, (eventType, filename) => {
-            if ((eventType === 'change' || eventType === 'rename') && filename && filename.endsWith('.json')) {
-                if (debounceTimer) clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(() => {
-                    handleSignalFile(path.join(CACHE_DIR, filename));
-                }, 75);
-            }
-        });
-        context.subscriptions.push({ dispose: () => watcher.close() });
-    } catch (e) {
-        console.error('Failed to watch cache dir', e);
+      data = JSON.parse(raw) as FocusRequest;
+    } catch {
+      // partial write — retry once shortly is handled by next watch event
+      return null;
     }
+    lastHandledMtime = st.mtimeMs;
+    lastHandledPayload = raw;
+    return data;
+  } catch (e: unknown) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === 'ENOENT') return null;
+    return null;
+  }
 }
 
-function getAncestorPids(startPid: number): Set<number> {
-    const ancestors = new Set<number>();
-    let currentPid = startPid;
-    while (currentPid > 1) {
-        try {
-            const out = execSync(`ps -p ${currentPid} -o ppid=`, { encoding: 'utf8' }).trim();
-            if (!out) break;
-            const ppid = parseInt(out, 10);
-            if (isNaN(ppid) || ppid <= 1) break;
-            ancestors.add(ppid);
-            currentPid = ppid;
-        } catch (e) {
-            break;
-        }
-    }
-    return ancestors;
+function handleFocusRequest(showToast: boolean): void {
+  const data = readFocusRequest();
+  if (!data) return;
+
+  const handle = (data.identity_handle || '').trim();
+  const sessionId = (data.session_id || '').trim() || handle;
+  if (!handle) {
+    // No identity — do nothing (never guess terminal[0])
+    return;
+  }
+
+  const term = terminalsById.get(handle);
+  if (!term) {
+    // Stale / unknown handle — do NOTHING
+    console.warn('[agentfocus] no terminal for identity_handle=', handle);
+    return;
+  }
+
+  // Drop disposed terminals
+  if (term.exitStatus !== undefined) {
+    forgetTerminal(term);
+    return;
+  }
+
+  focusTerminal(term, sessionId, handle, showToast);
 }
 
-async function handleSignalFile(filePath: string) {
-    try {
-        let content: string;
-        try {
-            content = fs.readFileSync(filePath, 'utf8');
-        } catch (e: any) {
-            if (e.code === 'ENOENT') return;
-            throw e;
-        }
+export function activate(context: vscode.ExtensionContext): void {
+  ensureCacheDir();
 
-        let data: any;
-        try {
-            data = JSON.parse(content);
-        } catch (e) {
-            // retry once for partial writes
-            await new Promise(r => setTimeout(r, 50));
-            content = fs.readFileSync(filePath, 'utf8');
-            data = JSON.parse(content);
-        }
-        
-        const signalPid = data.pid;
-        let matchedTerminal: vscode.Terminal | null = null;
-        
-        if (signalPid) {
-            const ancestors = getAncestorPids(signalPid);
-            const terms = vscode.window.terminals;
-            for (const term of terms) {
-                const termPid = await term.processId;
-                if (termPid && ancestors.has(termPid)) {
-                    matchedTerminal = term;
-                    break;
-                }
-            }
-        }
-        
-        if (!matchedTerminal) {
-            return; // on tty/pid MISS, do NOTHING
-        }
+  const collection = context.environmentVariableCollection;
+  primeEnvCollection(collection);
 
-        const action = "Focus Terminal";
-        vscode.window.showInformationMessage(`Agent: ${data.title} - ${data.message}`, action)
-            .then(selection => {
-                if (selection === action) {
-                    matchedTerminal!.show();
-                }
-            });
-    } catch (e) {}
+  // Terminals already open: map them for in-session focus, but they will NOT
+  // have AGENTFOCUS_VSCODE_ID in env until recreated (env is fixed at shell start).
+  for (const term of vscode.window.terminals) {
+    const id = newId();
+    rememberTerminal(term, id);
+  }
+
+  context.subscriptions.push(
+    vscode.window.onDidOpenTerminal((term) => {
+      onTerminalOpened(term);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.window.onDidCloseTerminal((term) => {
+      forgetTerminal(term);
+    })
+  );
+
+  // Watch focus-request.json (agy vscode adapter)
+  let debounce: NodeJS.Timeout | undefined;
+  const schedule = () => {
+    if (debounce) clearTimeout(debounce);
+    debounce = setTimeout(() => handleFocusRequest(true), 75);
+  };
+
+  try {
+    const watcher = fs.watch(CACHE_DIR, (_event, filename) => {
+      if (!filename) return;
+      if (filename === 'focus-request.json' || String(filename).endsWith('focus-request.json')) {
+        schedule();
+      }
+    });
+    context.subscriptions.push({ dispose: () => watcher.close() });
+  } catch (e) {
+    console.error('[agentfocus] watch failed', e);
+  }
+
+  // Poll fallback (some FS events drop on macOS network/home dirs)
+  const poll = setInterval(() => handleFocusRequest(true), 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(poll) });
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('agentfocus.focusTerminal', () => {
+      handleFocusRequest(false);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('agentfocus.debugListTerminals', () => {
+      const rows = [...terminalsById.entries()].map(([id, t]) => `${id.slice(0, 8)}… → ${t.name}`);
+      void vscode.window.showInformationMessage(
+        rows.length ? rows.join(' | ') : 'No mapped terminals'
+      );
+    })
+  );
 }
 
-export function deactivate() {}
+export function deactivate(): void {
+  terminalsById.clear();
+  idByTerminal.clear();
+}

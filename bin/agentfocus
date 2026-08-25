@@ -1,0 +1,184 @@
+#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const args = process.argv.slice(2);
+const command = args[0];
+const HOME = process.env.HOME;
+const REGISTRY_DIR = path.join(HOME, '.local/share/agentfocus/registry');
+const LOG_DIR = path.join(HOME, 'Library/Logs/agentfocus');
+const LOG_FILE = path.join(LOG_DIR, 'events.jsonl');
+const ADAPTERS_DIR = path.join(HOME, '.local/share/agentfocus/adapters');
+
+fs.mkdirSync(REGISTRY_DIR, { recursive: true });
+fs.mkdirSync(LOG_DIR, { recursive: true });
+
+function logEvent(event, id, app, ok, detail) {
+    const entry = { ts: Date.now(), event, id, app, ok, detail };
+    fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
+}
+
+const KNOWN_ADAPTERS = {
+    'iterm.app': 'iterm.js',
+    'apple_terminal': 'apple_terminal.js',
+    'vscode': 'vscode.js',
+    'ghostty': 'ghostty.js',
+};
+const STALE_MS = 6 * 60 * 60 * 1000; // ignore registry entries older than 6h
+
+function getWaitingSessions() {
+    if (!fs.existsSync(REGISTRY_DIR)) return [];
+    const now = Date.now();
+    const files = fs.readdirSync(REGISTRY_DIR).filter(f => f.endsWith('.json'));
+    const sessions = [];
+    for (const f of files) {
+        try {
+            const data = JSON.parse(fs.readFileSync(path.join(REGISTRY_DIR, f), 'utf8'));
+            if (data.waiting && (now - (data.ts || 0)) < STALE_MS) sessions.push(data);
+        } catch(e) {}
+    }
+    return sessions.sort((a, b) => b.ts - a.ts);
+}
+
+// Focus one session. Returns true on success, false if not focusable (unknown
+// terminal / no adapter / adapter error) — never runs `tell application "unknown"`.
+function focusSession(data) {
+    const term = String(data.term_program || '').toLowerCase();
+    const appName = data.term_program || 'unknown';
+    const adapterName = KNOWN_ADAPTERS[term];
+    if (!adapterName) {
+        // Editor-panel sessions (e.g. VS Code Claude panel) have no terminal, but
+        // editor_app + cwd give window-level routing: `open -a <editor> <root>`
+        // raises the existing window for that folder and never duplicates
+        // (verified on macOS 26). Panel-exact routing needs a vendor API; this
+        // is the accepted best-effort. Freshness gate: a stale entry must not
+        // open a closed project as a surprise new window.
+        const FRESH_MS = 30 * 60 * 1000;
+        if (data.editor_app && data.cwd && (Date.now() - (data.ts || 0)) < FRESH_MS) {
+            let root = data.cwd;
+            try {
+                root = execFileSync('git', ['-C', data.cwd, 'rev-parse', '--show-toplevel'],
+                    { encoding: 'utf8' }).trim() || data.cwd;
+            } catch(e) {}
+            try {
+                execFileSync('open', ['-a', data.editor_app, root]);
+                data.waiting = false;
+                data.ts = Date.now();
+                fs.writeFileSync(path.join(REGISTRY_DIR, `${data.session_id}.json`), JSON.stringify(data, null, 2), { mode: 0o600 });
+                logEvent('focus', data.session_id, data.editor_app, true, `window-level: ${root}`);
+                console.log(`Focused ${data.session_id} window-level in ${data.editor_app} (${root})`);
+                return true;
+            } catch(e) {
+                logEvent('focus', data.session_id, data.editor_app, false, e.message);
+            }
+        }
+        logEvent('focus', data.session_id, appName, false, 'no adapter for term_program');
+        console.error(`Skip ${data.session_id}: unfocusable terminal "${appName}"`);
+        return false;
+    }
+    const adapterScript = path.join(ADAPTERS_DIR, adapterName);
+    try {
+        // execFileSync (not execSync): argv is NOT shell-parsed, so a cwd/title
+        // containing a single quote can't break out or inject. Capture stdout so
+        // we can tell a real "hit" from a "miss".
+        const out = execFileSync(process.execPath, [adapterScript, JSON.stringify(data)], { encoding: 'utf8', maxBuffer: 1 << 20 });
+        // Adapters that can confirm the exact tab print "hit"/"miss". An explicit
+        // miss means we did NOT focus — keep the session waiting so focus-next can
+        // retry. Fire-and-forget adapters (ghostty/vscode) print neither → best-effort success.
+        if (/\bmiss\b/.test(out) && !/\bhit\b/.test(out)) {
+            logEvent('focus', data.session_id, appName, false, 'adapter reported miss');
+            console.error(`Miss: ${data.session_id} tab not found in ${appName} (still waiting)`);
+            return false;
+        }
+        data.waiting = false;
+        data.ts = Date.now();
+        fs.writeFileSync(path.join(REGISTRY_DIR, `${data.session_id}.json`), JSON.stringify(data, null, 2), { mode: 0o600 });
+        logEvent('focus', data.session_id, appName, true, 'ok');
+        console.log(`Focused ${data.session_id} in ${appName}`);
+        return true;
+    } catch(e) {
+        logEvent('focus', data.session_id, appName, false, e.message);
+        console.error(`Failed to focus ${data.session_id}: ${e.message}`);
+        return false;
+    }
+}
+
+if (command === 'focus') {
+    const id = args[1];
+    if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+        console.error("Invalid session id");
+        process.exit(1);
+    }
+    const rp = path.join(REGISTRY_DIR, `${id}.json`);
+    if (!fs.existsSync(rp)) {
+        console.error(`Session ${id} not found`);
+        process.exit(1);
+    }
+    const data = JSON.parse(fs.readFileSync(rp, 'utf8'));
+    process.exit(focusSession(data) ? 0 : 1);
+} else if (command === 'focus-next') {
+    const waiting = getWaitingSessions();
+    let done = false;
+    for (const s of waiting) {
+        if (focusSession(s)) { done = true; break; } // try next focusable if one fails
+    }
+    if (!done) console.log(waiting.length ? "No focusable waiting session" : "No waiting sessions");
+    process.exit(done ? 0 : 1);
+} else if (command === 'list') {
+    const waiting = getWaitingSessions();
+    if (waiting.length === 0) console.log("No waiting sessions");
+    waiting.forEach(s => console.log(`${s.session_id}\t${s.term_program}\t${s.title}\t${s.identity_handle}`));
+    process.exit(0);
+} else if (command === 'doctor') {
+    // Read-only install health check. Does not touch registry entries or focus.
+    const installRoot = path.join(HOME, '.local/share/agentfocus');
+    const settingsPath = path.join(HOME, '.claude/settings.json');
+    let ok = true;
+    const check = (label, pass, detail) => {
+        console.log(`${pass ? 'ok' : 'MISSING'}  ${label}${detail ? ' — ' + detail : ''}`);
+        if (!pass) ok = false;
+    };
+
+    console.log('AgentFocus Doctor');
+    console.log(`Registry: ${REGISTRY_DIR}`);
+    console.log(`Logs: ${LOG_DIR}`);
+    console.log(`Install: ${installRoot}`);
+
+    check('CLI binary', fs.existsSync(path.join(installRoot, 'bin/agentfocus')));
+    check('emit hook', fs.existsSync(path.join(installRoot, 'hook/emit.js')));
+    check('clear-waiting hook', fs.existsSync(path.join(installRoot, 'hook/clear-waiting.js')));
+
+    for (const name of Object.values(KNOWN_ADAPTERS)) {
+        check(`adapter ${name}`, fs.existsSync(path.join(ADAPTERS_DIR, name)));
+    }
+
+    let hooksOk = false;
+    try {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        const blob = JSON.stringify(settings.hooks || {});
+        hooksOk = blob.includes('agentfocus') && blob.includes('emit.js');
+        const hasClear = blob.includes('clear-waiting.js');
+        check('Claude hooks (Stop/Notification emit)', hooksOk, settingsPath);
+        check('Claude hooks (UserPromptSubmit clear-waiting)', hasClear, settingsPath);
+    } catch (e) {
+        check('Claude settings readable', false, e.message);
+    }
+
+    const onPath = (process.env.PATH || '').split(path.delimiter).some(p => {
+        try { return fs.existsSync(path.join(p, 'agentfocus')); } catch { return false; }
+    });
+    check('agentfocus on PATH', onPath, onPath ? '' : `add ${path.join(installRoot, 'bin')} to PATH`);
+
+    const waiting = getWaitingSessions();
+    console.log(`Waiting sessions: ${waiting.length}`);
+    waiting.slice(0, 5).forEach(s => {
+        const ageMin = Math.round((Date.now() - (s.ts || 0)) / 60000);
+        console.log(`  - ${s.session_id}  ${s.term_program}  ${ageMin}m ago  ${s.title || ''}`);
+    });
+
+    process.exit(ok ? 0 : 1);
+} else {
+    console.log("Usage: agentfocus <focus | focus-next | list | doctor> [id]");
+    process.exit(1);
+}

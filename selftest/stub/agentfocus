@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# agentfocus STUB CLI — control-plane only.
+# Subcommands: register | notify | focus
+# Real product will keep the same events.jsonl + last-focus contract.
+set -euo pipefail
+
+LOG_DIR="${HOME}/Library/Logs/agentfocus"
+REG_DIR="${HOME}/Library/Application Support/agentfocus/registry"
+EVENTS="${LOG_DIR}/events.jsonl"
+LAST_FOCUS="/tmp/agentfocus-last-focus.json"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  agentfocus register --id <id> --app <app> [--hint <hint>]
+  agentfocus notify  --id <id> [--title <t>] [--body <b>]
+  agentfocus focus   --id <id>
+
+Apps (aliases): vscode|code, cursor, iterm|iterm2, ghostty, terminal, tmux
+EOF
+  exit 2
+}
+
+ts_now() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+ensure_dirs() {
+  mkdir -p "$LOG_DIR" "$REG_DIR"
+}
+
+# Append one JSONL event. Values passed as env-ish args; uses node for safe JSON (no Date.now).
+# Usage: append_event <event> <id> <app> <ok:true|false> <detail>
+append_event() {
+  local event="$1" id="$2" app="$3" ok="$4" detail="$5"
+  local ts
+  ts="$(ts_now)"
+  ensure_dirs
+  node -e '
+    const fs = require("fs");
+    const [ts, event, id, app, ok, detail, path] = process.argv.slice(1);
+    const rec = {
+      ts,
+      event,
+      id,
+      app: app || null,
+      ok: ok === "true",
+      detail: detail || ""
+    };
+    fs.appendFileSync(path, JSON.stringify(rec) + "\n");
+  ' "$ts" "$event" "$id" "$app" "$ok" "$detail" "$EVENTS"
+}
+
+# Parse --key value args into globals
+ID="" APP="" HINT="" TITLE="" BODY=""
+parse_kv() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --id)    ID="${2:-}"; shift 2 ;;
+      --app)   APP="${2:-}"; shift 2 ;;
+      --hint)  HINT="${2:-}"; shift 2 ;;
+      --title) TITLE="${2:-}"; shift 2 ;;
+      --body)  BODY="${2:-}"; shift 2 ;;
+      -h|--help) usage ;;
+      *) echo "unknown arg: $1" >&2; usage ;;
+    esac
+  done
+}
+
+# Map logical app -> macOS application name for `open -a`
+open_name_for() {
+  case "$1" in
+    vscode|code)          echo "Visual Studio Code" ;;
+    "code-insiders"|insiders) echo "Visual Studio Code - Insiders" ;;
+    cursor)               echo "Cursor" ;;
+    iterm|iterm2)         echo "iTerm" ;;
+    ghostty)              echo "Ghostty" ;;
+    terminal|terminal.app|Apple_Terminal) echo "Terminal" ;;
+    tmux)                 echo "Terminal" ;;
+    *)                    echo "$1" ;;
+  esac
+}
+
+cmd_register() {
+  parse_kv "$@"
+  if [ -z "$ID" ] || [ -z "$APP" ]; then
+    echo "register requires --id and --app" >&2
+    usage
+  fi
+  ensure_dirs
+  local ts path
+  ts="$(ts_now)"
+  path="${REG_DIR}/${ID}.json"
+  node -e '
+    const fs = require("fs");
+    const [path, id, app, hint, ts] = process.argv.slice(1);
+    fs.writeFileSync(path, JSON.stringify({ id, app, hint: hint || "", ts }, null, 0) + "\n");
+  ' "$path" "$ID" "$APP" "$HINT" "$ts"
+  append_event "register" "$ID" "$APP" "true" "hint=${HINT}"
+  echo "registered id=$ID app=$APP hint=${HINT:-} -> $path"
+}
+
+cmd_notify() {
+  parse_kv "$@"
+  if [ -z "$ID" ]; then
+    echo "notify requires --id" >&2
+    usage
+  fi
+  TITLE="${TITLE:-agentfocus}"
+  BODY="${BODY:-session needs attention}"
+  local app="" reg="${REG_DIR}/${ID}.json"
+  if [ -f "$reg" ]; then
+    app="$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(r.app||"")' "$reg")"
+  fi
+
+  # Tahoe-safe-ish path that works on this Mac: osascript display notification
+  # (Real product will use UNUserNotificationCenter in a helper app.)
+  local ok="true" detail="osascript display notification"
+  if ! osascript -e "display notification $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$BODY") with title $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$TITLE") subtitle $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "id=$ID")" 2>/tmp/agentfocus-notify.err; then
+    ok="false"
+    detail="osascript failed: $(tr '\n' ' ' </tmp/agentfocus-notify.err)"
+  fi
+  append_event "notify" "$ID" "$app" "$ok" "$detail"
+  if [ "$ok" != "true" ]; then
+    echo "notify failed for id=$ID: $detail" >&2
+    exit 1
+  fi
+  echo "notified id=$ID title=$TITLE"
+}
+
+cmd_focus() {
+  parse_kv "$@"
+  if [ -z "$ID" ]; then
+    echo "focus requires --id" >&2
+    usage
+  fi
+  local reg="${REG_DIR}/${ID}.json"
+  if [ ! -f "$reg" ]; then
+    append_event "focus" "$ID" "" "false" "no registry entry"
+    echo "no registry entry for id=$ID (run register first)" >&2
+    exit 1
+  fi
+
+  local app hint terminal_id open_name
+  app="$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(r.app||"")' "$reg")"
+  hint="$(node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(r.hint||"")' "$reg")"
+  terminal_id="${hint:-$ID}"
+  open_name="$(open_name_for "$app")"
+
+  local ok="true" detail="activated:$open_name"
+  # Prefer `open -a` (no Automation TCC). Fallback to osascript activate.
+  if ! open -a "$open_name" 2>/tmp/agentfocus-focus.err; then
+    if ! osascript -e "tell application \"$open_name\" to activate" 2>>/tmp/agentfocus-focus.err; then
+      ok="false"
+      detail="activate failed: $(tr '\n' ' ' </tmp/agentfocus-focus.err)"
+    fi
+  fi
+
+  local ts
+  ts="$(ts_now)"
+  node -e '
+    const fs = require("fs");
+    const [path, id, app, terminalId, ts, ok] = process.argv.slice(1);
+    fs.writeFileSync(path, JSON.stringify({
+      id,
+      app,
+      terminalId,
+      ts,
+      ok: ok === "true"
+    }) + "\n");
+  ' "$LAST_FOCUS" "$ID" "$app" "$terminal_id" "$ts" "$ok"
+
+  append_event "focus" "$ID" "$app" "$ok" "$detail"
+  if [ "$ok" != "true" ]; then
+    echo "focus failed for id=$ID: $detail" >&2
+    exit 1
+  fi
+  echo "focused id=$ID app=$app terminalId=$terminal_id open=$open_name"
+}
+
+main() {
+  local cmd="${1:-}"
+  if [ -z "$cmd" ]; then usage; fi
+  shift || true
+  case "$cmd" in
+    register) cmd_register "$@" ;;
+    notify)   cmd_notify "$@" ;;
+    focus)    cmd_focus "$@" ;;
+    -h|--help|help) usage ;;
+    *) echo "unknown command: $cmd" >&2; usage ;;
+  esac
+}
+
+main "$@"
