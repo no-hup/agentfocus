@@ -130,6 +130,140 @@ if (command === 'focus') {
     if (waiting.length === 0) console.log("No waiting sessions");
     waiting.forEach(s => console.log(`${s.session_id}\t${s.term_program}\t${s.title}\t${s.identity_handle}`));
     process.exit(0);
+} else if (command === 'init') {
+    // User-space setup. Idempotent: safe to re-run after every brew upgrade.
+    // Everything that touches $HOME lives here — the brew formula must not.
+    const SHARE = path.join(HOME, '.local/share/agentfocus');
+    const APPS = path.join(HOME, 'Applications');
+    const HELPER = path.join(APPS, 'AgentFocus.app');
+    const HELPER_EXEC = path.join(HELPER, 'Contents/MacOS/AgentFocus');
+    const SETTINGS = path.join(HOME, '.claude/settings.json');
+
+    // Source root = the dir containing bin/agentfocus, symlinks resolved
+    // (brew puts a symlink in bin/ pointing into the keg).
+    const root = path.dirname(path.dirname(fs.realpathSync(process.argv[1])));
+    const buildScript = path.join(root, 'helper/build.sh');
+    const libexecApp = path.join(root, 'libexec/AgentFocus.app');
+    const isDev = fs.existsSync(buildScript);
+    if (!isDev && !fs.existsSync(libexecApp)) {
+        console.error(`Cannot find the helper source or build at ${root}.`);
+        console.error('Run init from a repo checkout, or install with brew first.');
+        process.exit(1);
+    }
+
+    const running = () => {
+        try { execFileSync('pgrep', ['-f', 'AgentFocus.app/Contents/MacOS/AgentFocus'], { stdio: 'ignore' }); return true; }
+        catch (e) { return false; }
+    };
+    const wasRunning = running();  // must be sampled before we launch anything
+
+    // (a) runtime layout. The helper (helper/main.swift) and the hooks both
+    // hardcode ~/.local/share/agentfocus, so it stays canonical even under brew.
+    for (const d of ['hook', 'adapters', 'bin', 'integrations']) {
+        if (!fs.existsSync(path.join(root, d))) continue; // integrations/ is optional
+        fs.mkdirSync(path.join(SHARE, d), { recursive: true });
+        fs.cpSync(path.join(root, d), path.join(SHARE, d), { recursive: true });
+    }
+    fs.chmodSync(path.join(SHARE, 'bin/agentfocus'), 0o755);
+    for (const h of ['emit.js', 'clear-waiting.js']) fs.chmodSync(path.join(SHARE, 'hook', h), 0o755);
+    console.log(`runtime: ${SHARE}`);
+
+    // (b) helper app — ONE location everywhere (~/Applications), because
+    // hook/emit.js hardcodes it and SMAppService login items break when a
+    // versioned Cellar keg is deleted on upgrade. libexec is just the artifact.
+    fs.mkdirSync(APPS, { recursive: true });
+    // Compare the executable's bytes, not its mtime: cpSync always bumps mtime,
+    // and what matters is whether the RUNNING process is now a stale binary.
+    const execBytes = () => { try { return fs.readFileSync(HELPER_EXEC); } catch (e) { return null; } };
+    const oldExec = execBytes();
+    if (isDev) {
+        execFileSync(buildScript, [APPS], { stdio: 'inherit' });
+    } else {
+        fs.cpSync(libexecApp, HELPER, { recursive: true });
+    }
+    const replaced = !oldExec || !oldExec.equals(execBytes());
+    console.log(`helper:  ${HELPER}${replaced ? ' (updated)' : ''}`);
+
+    fs.writeFileSync(path.join(SHARE, 'config.json'),
+        JSON.stringify({ helper: HELPER }, null, 2) + '\n');
+
+    // (c) Claude hooks. Non-destructive merge, ported from install.sh: strip our
+    // own entries then re-append, so a re-run can never duplicate them. Only
+    // writes (and only backs up) if the result actually differs — a re-run on a
+    // configured machine leaves settings.json byte-identical.
+    fs.mkdirSync(path.dirname(SETTINGS), { recursive: true });
+    const before = fs.existsSync(SETTINGS) ? fs.readFileSync(SETTINGS, 'utf8') : '{}';
+    const data = JSON.parse(before);
+    if (!data.hooks) data.hooks = {};
+    // ponytail: matches the {command:"node", args:[...]} shape install.sh writes.
+    // A hand-written `"command": "node /path/emit.js"` string would not be
+    // recognised and would end up duplicated — `doctor` reports it instead.
+    const removeOurs = (arr) => {
+        for (let i = arr.length - 1; i >= 0; i--) {
+            if (!arr[i].hooks) continue;
+            arr[i].hooks = arr[i].hooks.filter(h =>
+                h.type !== 'command' || h.command !== 'node' ||
+                (h.args && h.args[0] && !String(h.args[0]).includes('agentfocus')));
+            if (arr[i].hooks.length === 0) arr.splice(i, 1);
+        }
+    };
+    for (const evt of ['Stop', 'Notification', 'UserPromptSubmit']) {
+        if (!data.hooks[evt]) data.hooks[evt] = [];
+        removeOurs(data.hooks[evt]);
+    }
+    const hookDef = (f) => ({ hooks: [{ type: 'command', command: 'node', args: [path.join(SHARE, 'hook', f)] }] });
+    data.hooks.Stop.push(hookDef('emit.js'));
+    data.hooks.Notification.push(hookDef('emit.js'));
+    data.hooks.UserPromptSubmit.push(hookDef('clear-waiting.js'));
+
+    // Keep the file's existing trailing-newline convention, or the "unchanged"
+    // compare below trips on one byte and rewrites a settings.json we agree with.
+    let after = JSON.stringify(data, null, 2);
+    if (before.endsWith('\n') || !fs.existsSync(SETTINGS)) after += '\n';
+    if (after === before) {
+        console.log(`hooks:   already configured, unchanged (${SETTINGS})`);
+    } else {
+        if (fs.existsSync(SETTINGS)) fs.copyFileSync(SETTINGS, `${SETTINGS}.agentfocus-backup-${Date.now()}`);
+        fs.writeFileSync(SETTINGS, after);
+        console.log(`hooks:   installed into ${SETTINGS}${before === '{}' ? '' : ' (backed up)'}`);
+    }
+
+    // (d) Launch. `open -g` is idempotent and never steals focus. Restart when we
+    // just replaced the bundle under a running (now stale) process. The first
+    // requestAuthorization after a fresh install can spuriously fail, so a
+    // never-ran-before helper gets the same quit/relaunch treatment.
+    // AGENTFOCUS_SKIP_LAUNCH exists so selftest/init-merge.sh can exercise the
+    // merge under a throwaway $HOME without launching a bundle out of /tmp
+    // (UN rejects those) or registering a stray login item.
+    if (!process.env.AGENTFOCUS_SKIP_LAUNCH) {
+        execFileSync('open', ['-g', HELPER]);
+        if (replaced || !wasRunning) {
+            execFileSync('/bin/sleep', ['5']);
+            try { execFileSync('pkill', ['-f', 'AgentFocus.app/Contents/MacOS/AgentFocus'], { stdio: 'ignore' }); } catch (e) {}
+            execFileSync('/bin/sleep', ['1']);
+            execFileSync('open', ['-g', HELPER]);
+            console.log('helper:  relaunched (fresh build / first run)');
+        }
+    }
+
+    if (!(process.env.PATH || '').split(path.delimiter).some(p => fs.existsSync(path.join(p, 'agentfocus')))) {
+        console.log(`\nPATH:    export PATH="${path.join(SHARE, 'bin')}:$PATH"   # add to your shell rc`);
+    }
+
+    console.log(`
+Permissions — what macOS will ask you, honestly:
+  Notifications  macOS is prompting now (or already did). Deny it and banners
+                 never appear. System Settings > Notifications > AgentFocus.
+  Login item     "AgentFocus Login Item Added" is an FYI banner, not a prompt.
+                 Nothing to approve; toggle it from the menu-bar icon.
+  Automation     The FIRST banner click for each terminal app prompts once.
+                 It prompts AGAIN after AgentFocus is rebuilt or upgraded —
+                 the grant is keyed to the app's signature. Known, accepted.
+  Silencers      A macOS Focus mode or Scheduled Summary hides banners with no
+                 error anywhere. If banners vanish, check those first.
+
+Next: agentfocus doctor`);
+    process.exit(0);
 } else if (command === 'doctor') {
     // Read-only install health check. Does not touch registry entries or focus.
     const installRoot = path.join(HOME, '.local/share/agentfocus');
@@ -154,8 +288,9 @@ if (command === 'focus') {
     }
 
     let hooksOk = false;
+    let settings = null;
     try {
-        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
         const blob = JSON.stringify(settings.hooks || {});
         hooksOk = blob.includes('agentfocus') && blob.includes('emit.js');
         const hasClear = blob.includes('clear-waiting.js');
@@ -164,6 +299,52 @@ if (command === 'focus') {
     } catch (e) {
         check('Claude settings readable', false, e.message);
     }
+
+    // --- helper app + banner-delivery checks (advisory: `warn` never fails the
+    // exit code, so `doctor` still means "install is intact"). ---
+    const warn = (label, detail) => console.log(`warn  ${label}${detail ? ' — ' + detail : ''}`);
+    let helperApp = path.join(HOME, 'Applications/AgentFocus.app');
+    try { helperApp = JSON.parse(fs.readFileSync(path.join(installRoot, 'config.json'), 'utf8')).helper || helperApp; } catch (e) {}
+    check('helper app', fs.existsSync(path.join(helperApp, 'Contents/MacOS/AgentFocus')), helperApp);
+
+    let helperRunning = false;
+    try { execFileSync('pgrep', ['-f', 'AgentFocus.app/Contents/MacOS/AgentFocus'], { stdio: 'ignore' }); helperRunning = true; } catch (e) {}
+    if (helperRunning) console.log('ok  helper running');
+    else warn('helper not running', 'no banners or hotkey until it starts — run: agentfocus init');
+
+    // UN authorization: read what the helper itself logged. Asking macOS costs a
+    // TCC surface we refuse to take.
+    try {
+        const lines = fs.readFileSync(path.join(LOG_DIR, 'helper.log'), 'utf8').trim().split('\n');
+        const last = lines.reverse().find(l => l.includes('UN auth granted='));
+        if (!last) warn('UN authorization unknown', 'helper has not requested it yet');
+        else if (/granted=true/.test(last)) console.log('ok  UN authorization granted');
+        else warn('UN authorization NOT granted', 'System Settings > Notifications > AgentFocus > Allow');
+    } catch (e) {
+        warn('UN authorization unknown', 'no helper log yet');
+    }
+
+    // Focus mode / Scheduled Summary silence every banner with no error anywhere.
+    // Reading their state needs Full Disk Access (verified: ~/Library/DoNotDisturb
+    // is TCC-protected even outside the sandbox), and this tool does not ask for
+    // heavy permissions — so this is an advisory, not a probe.
+    warn('banner silencers not machine-checkable',
+        'if banners never appear, check Control Center > Focus and Notifications > Scheduled Summary');
+
+    let quarantined = false;
+    try { execFileSync('xattr', ['-p', 'com.apple.quarantine', helperApp], { stdio: 'ignore' }); quarantined = true; } catch (e) {}
+    if (quarantined) warn('helper is quarantined', `fix: xattr -dr com.apple.quarantine ${helperApp}`);
+
+    // Another notifier on Stop = a second banner for the same event.
+    try {
+        const rivals = (settings?.hooks?.Stop || []).flatMap(e => e.hooks || [])
+            .filter(h => !JSON.stringify(h).includes('agentfocus'));
+        if (rivals.length) rivals.forEach(h => warn('rival Stop hook (duplicate-banner risk)', h.command));
+        else console.log('ok  no rival Stop hooks');
+    } catch (e) {}
+
+    console.log('note  Automation grants are keyed to the helper\'s signature: rebuilding or');
+    console.log('note  upgrading AgentFocus re-prompts on the next banner click. Expected.');
 
     const onPath = (process.env.PATH || '').split(path.delimiter).some(p => {
         try { return fs.existsSync(path.join(p, 'agentfocus')); } catch { return false; }
@@ -179,6 +360,6 @@ if (command === 'focus') {
 
     process.exit(ok ? 0 : 1);
 } else {
-    console.log("Usage: agentfocus <focus | focus-next | list | doctor> [id]");
+    console.log("Usage: agentfocus <init | focus | focus-next | list | doctor> [id]");
     process.exit(1);
 }
