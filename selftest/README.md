@@ -9,6 +9,7 @@ Two tracks:
 |---|---|---|
 | **Stub** | `./smoke.sh` | `stub/agentfocus` (no agy core required) |
 | **Real product** | `./smoke-real.sh` | agy CLI + registry under `~/.local/share/agentfocus/` |
+| **Fresh account** | `./fresh-user.sh` | full install-day story on a brand-new macOS user — human-in-the-loop prompt census, banner/click/hotkey, logout-login persistence, rebuild re-prompt. `--resume` after re-login. |
 
 ### agy product contract (smoke-real)
 
@@ -63,6 +64,7 @@ selftest/
   smoke.sh            # stub full loop
   smoke-real.sh       # REAL product: spawn Terminal.app + agentfocus focus/focus-next
   perms-doctor.sh     # TCC technique probe table
+  fresh-user.sh       # fresh-macOS-account falsification run (human answers y/n)
   README.md
 ```
 
@@ -80,6 +82,11 @@ chmod +x stub/agentfocus sim-click.sh smoke.sh smoke-real.sh perms-doctor.sh ass
 
 # REAL product smoke (requires agy CLI installed under ~/.local/share)
 ./smoke-real.sh
+
+# Fresh-account run — ONLY on a brand-new macOS user, before installing anything.
+# Location-independent; copy it to ~/ on the test account and run from there.
+AF_INSTALL=brew ./fresh-user.sh        # then, after a logout/login:
+./fresh-user.sh --resume
 ```
 
 ### Manual step-through
