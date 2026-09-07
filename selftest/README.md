@@ -9,7 +9,7 @@ Two tracks:
 |---|---|---|
 | **Stub** | `./smoke.sh` | `stub/agentfocus` (no agy core required) |
 | **Real product** | `./smoke-real.sh` | agy CLI + registry under `~/.local/share/agentfocus/` |
-| **Fresh account** | `./fresh-user.sh` | full install-day story on a brand-new macOS user — human-in-the-loop prompt census, banner/click/hotkey, logout-login persistence, rebuild re-prompt. `--resume` after re-login. |
+| **Fresh account** | `./fresh-user.sh` (see [FRESH-NPM.md](FRESH-NPM.md) for the npm runbook) | full install-day story on a brand-new macOS user — human-in-the-loop prompt census, banner/click/hotkey, logout-login persistence, rebuild re-prompt. `--resume` after re-login. |
 
 ### agy product contract (smoke-real)
 
@@ -18,7 +18,7 @@ Two tracks:
 | Registry | `~/.local/share/agentfocus/registry/<session_id>.json` |
 | CLI | `~/.local/share/agentfocus/bin/agentfocus` (`focus`, `focus-next`, `list`, `doctor`) |
 | VS Code focus signal | `~/.cache/agentfocus/focus-request.json` |
-| Last focus (harness) | `/tmp/agentfocus-last-focus.json` |
+| VS Code ext breadcrumb | `~/.cache/agentfocus/last-focus.json` |
 
 **Never** put hook/CLI runtime scripts on `~/Desktop` — Terminal spawned via Automation often cannot read Desktop (TCC). `smoke-real.sh` stages under `~/.local/share/agentfocus/selftest-run/`.
 
@@ -28,7 +28,7 @@ Two tracks:
 |---|---|
 | Event log | `~/Library/Logs/agentfocus/events.jsonl` |
 | Session registry (stub) | `~/Library/Application Support/agentfocus/registry/<id>.json` |
-| Last focus result | `/tmp/agentfocus-last-focus.json` |
+| Last focus result | `~/.cache/agentfocus/selftest-last-focus.json` |
 | Click routing | `focus --id` (same path `sim-click.sh` uses) |
 
 ## Requirements
@@ -63,6 +63,11 @@ selftest/
     check_tab.sh
   smoke.sh            # stub full loop
   smoke-real.sh       # REAL product: spawn Terminal.app + agentfocus focus/focus-next
+  editor-window.sh    # verifier: does an editor really have this folder open?
+  adapter-status.sh   # does the CLI read hit/miss/degraded from an adapter correctly?
+  idle-return.sh      # focus-on-return (human steps away; reads the helper log)
+  uninstall.sh        # does `uninstall` fully reverse `init`? (hooks, dirs, no-op re-run)
+osc-native.sh       # emit.js osc_native decision (wrong `true` = no banner anywhere)
   perms-doctor.sh     # TCC technique probe table
   fresh-user.sh       # fresh-macOS-account falsification run (human answers y/n)
   README.md
@@ -83,10 +88,23 @@ chmod +x stub/agentfocus sim-click.sh smoke.sh smoke-real.sh perms-doctor.sh ass
 # REAL product smoke (requires agy CLI installed under ~/.local/share)
 ./smoke-real.sh
 
+# Unit-ish checks — no GUI, no Aqua session needed
+./editor-window.sh          # asserts against THIS machine's live window state
+./adapter-status.sh         # stub adapters under a throwaway $HOME; no app is activated
+./osc-native.sh
+./uninstall.sh              # throwaway $HOME; init then uninstall, twice
+
 # Fresh-account run — ONLY on a brand-new macOS user, before installing anything.
 # Location-independent; copy it to ~/ on the test account and run from there.
 AF_INSTALL=brew ./fresh-user.sh        # then, after a logout/login:
 ./fresh-user.sh --resume
+
+# The npm path — the one real users take, and the only one that proves no
+# compiler is needed. See FRESH-NPM.md for the whole 15-minute procedure.
+AF_INSTALL=npm AF_TGZ=/Users/Shared/agentfocus-0.1.0.tgz ./fresh-user.sh
+
+# Focus-on-return. Asks you to take your hands off the keyboard twice.
+./idle-return.sh
 ```
 
 ### Manual step-through
@@ -112,7 +130,7 @@ agentfocus focus   --id <id>
 
 - **register** — writes registry JSON; appends `event=register` to JSONL  
 - **notify** — posts a real notification via `osascript display notification` (works on this Mac / Tahoe path we validated); appends `event=notify`  
-- **focus** — `open -a <App>` (fallback AppleScript `activate`); writes `/tmp/agentfocus-last-focus.json`; appends `event=focus`
+- **focus** — `open -a <App>` (fallback AppleScript `activate`); writes `~/.cache/agentfocus/selftest-last-focus.json`; appends `event=focus`
 
 Timestamps use shell `date -u +%Y-%m-%dT%H:%M:%SZ` (no `Date.now()`). IDs use `uuidgen`.
 
@@ -150,7 +168,7 @@ Until then, `sim-click.sh` is the valid routing e2e.
 | Banner *visible* / chrome / sound / grouping | **No** | human glance |
 | Simulated click routing (`focus`) | **Yes** | `sim-click.sh` |
 | Frontmost application | **Yes** | `lsappinfo` + `check_frontmost.sh` |
-| Correct tab (VS Code / Cursor / Ghostty stub) | **Yes** (control plane) | `/tmp/agentfocus-last-focus.json` |
+| Correct tab (VS Code / Cursor / Ghostty stub) | **Yes** (control plane) | `~/.cache/agentfocus/selftest-last-focus.json` |
 | Correct tty (iTerm / Terminal) | **Yes if Automation granted** | AppleScript; else last-focus fallback |
 | Correct tmux pane | **Yes if inside tmux** | `tmux display-message` |
 | First-run TCC prompts | **No** | human click Allow |
@@ -183,5 +201,5 @@ Prints a table: `technique | needs | granted? | detail` by **attempting** each c
 Replace `stub/agentfocus` with the real helper CLI **without changing** the assert scripts if you keep:
 
 1. JSONL event shape: `{ts, event, id, app, ok, detail}`  
-2. `focus` writes `/tmp/agentfocus-last-focus.json` `{id, app, terminalId, ts, ok?}`  
+2. `focus` writes `~/.cache/agentfocus/selftest-last-focus.json` `{id, app, terminalId, ts, ok?}`  
 3. Click → same `focus --id` path (directly or via `agentfocus://`)

@@ -10,6 +10,19 @@ const { execFileSync } = require('child_process');
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agentfocus-test-'));
 process.env.HOME = HOME; // inherited by every child, and used by _emit directly
+// `open` and `osascript` are NOT scoped by $HOME: with no helper app under a
+// throwaway home, emit.js falls back to `osascript display notification` and a
+// real banner lands on the live desktop, from a test. Stub both on PATH — the
+// same trick selftest/osc-native.sh already uses.
+function stubPath(home) {
+    const dir = path.join(home, 'stub');
+    fs.mkdirSync(dir, { recursive: true });
+    for (const cmd of ['open', 'osascript']) {
+        fs.writeFileSync(path.join(dir, cmd), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    }
+    return dir + path.delimiter + process.env.PATH;
+}
+process.env.PATH = stubPath(HOME);
 const REG = path.join(HOME, '.local/share/agentfocus/registry');
 const SHIM = path.join(__dirname, 'shim.js');
 

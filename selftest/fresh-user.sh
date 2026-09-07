@@ -19,7 +19,9 @@
 #   ./fresh-user.sh --resume     # gates G8b–G9 after you log back in
 #   ./fresh-user.sh --help
 #
-# Install path: AF_INSTALL=brew (default) or AF_INSTALL=dev
+# Install path: AF_INSTALL=brew (default) | dev | npm
+#   npm also needs AF_TGZ=/path/to/agentfocus-x.y.z.tgz (from `npm pack`). That is the
+#   path real users take, and the only one that proves no compiler is needed.
 #
 # Exit: 0 = PASS or PARTIAL (resume pending), 1 = FAIL, 2 = wrong account (G0).
 set -uo pipefail
@@ -32,6 +34,7 @@ BUNDLE="${HOME}/Applications/AgentFocus.app"
 CLI="${HOME}/.local/share/agentfocus/bin/agentfocus"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 AF_INSTALL="${AF_INSTALL:-brew}"
+AF_TGZ="${AF_TGZ:-}"
 
 PASS=0; FAIL=0; SKIP=0
 RESULTS=()
@@ -195,9 +198,32 @@ g1_install() {
       "$REPO/install.sh" 2>&1 | tee -a "$LOG"
       rc=${PIPESTATUS[0]}
       ;;
-    *) fail "G1 unknown AF_INSTALL='$AF_INSTALL' (want brew|dev)"; return ;;
+    npm)
+      if [ -z "$AF_TGZ" ] || [ ! -f "$AF_TGZ" ]; then
+        fail "G1 AF_INSTALL=npm needs AF_TGZ=/path/to/agentfocus-x.y.z.tgz"; return
+      fi
+      say "running: npm install -g $AF_TGZ && agentfocus init"
+      npm install -g "$AF_TGZ" 2>&1 | tee -a "$LOG"
+      rc=${PIPESTATUS[0]}
+      [ "$rc" -eq 0 ] && { agentfocus init 2>&1 | tee -a "$LOG"; rc=${PIPESTATUS[0]}; }
+      ;;
+    *) fail "G1 unknown AF_INSTALL='$AF_INSTALL' (want brew|dev|npm)"; return ;;
   esac
   [ "$rc" -eq 0 ] && pass "G1 installer exited 0" || fail "G1 installer exited $rc"
+
+  # The whole point of the npm path: the user never compiles anything. build.sh
+  # prints "Built ..." — its absence is the proof the prebuilt bundle was copied.
+  # (swiftc cannot just be removed from PATH: /usr/bin/swiftc is a system shim.)
+  if [ "$AF_INSTALL" = npm ]; then
+    if grep -q "^Built " "$LOG"; then fail "G1 npm install COMPILED the helper (dev path taken)"
+    else pass "G1 prebuilt helper used — no compiler"; fi
+    if lipo -archs "$BUNDLE/Contents/MacOS/AgentFocus" 2>&1 | tee -a "$LOG" | grep -q arm64
+      then pass "G1 helper is universal"; else fail "G1 helper is not universal"; fi
+    if otool -l "$BUNDLE/Contents/MacOS/AgentFocus" 2>/dev/null | grep -A3 LC_BUILD_VERSION | tee -a "$LOG" | grep -q "minos 13"
+      then pass "G1 helper targets macOS 13"; else fail "G1 helper does not target macOS 13"; fi
+    if xattr -lr "$BUNDLE" 2>/dev/null | grep -qi quarantine
+      then fail "G1 helper is quarantined (Gatekeeper will block it)"; else pass "G1 no quarantine xattr"; fi
+  fi
   [ -x "$CLI" ] && pass "G1 CLI present at $CLI" || fail "G1 CLI missing at $CLI"
   [ -d "$BUNDLE" ] && pass "G1 helper bundle present at $BUNDLE" || fail "G1 helper bundle missing at $BUNDLE"
   expect n "During the install itself, did ANY permission prompt or dialog appear?" "G1 install is prompt-free"
@@ -381,6 +407,8 @@ g9_rebuild() {
   say "re-prompt after a rebuild is the documented, accepted behaviour — a PASS."
   case "$AF_INSTALL" in
     dev) say "running: $REPO/install.sh"; "$REPO/install.sh" 2>&1 | tee -a "$LOG" ;;
+    npm) say "running: npm install -g $AF_TGZ && agentfocus init (SAME bytes → same cdhash)"
+         npm install -g "$AF_TGZ" 2>&1 | tee -a "$LOG"; agentfocus init 2>&1 | tee -a "$LOG" ;;
     *)   say "running: agentfocus init (refreshes the helper from brew libexec)"; agentfocus init 2>&1 | tee -a "$LOG" ;;
   esac
   pkill -f "AgentFocus.app/Contents/MacOS/AgentFocus" 2>/dev/null
@@ -392,12 +420,19 @@ g9_rebuild() {
   sleep 5
   expect y "Did a banner appear after the rebuild?" "G9 banner works post-rebuild"
   pause "click the banner and answer any prompt"
-  ask "Did exactly ONE Automation prompt appear (and nothing else)?"
-  case "$ANS" in
-    y) PC_AUTOMATION=$((PC_AUTOMATION+1)); pass "G9 exactly one Automation re-prompt (expected tradeoff)" ;;
-    s) skip "G9 re-prompt (skipped)" ;;
-    *) fail "G9 expected exactly one Automation re-prompt and nothing else" ;;
-  esac
+  if [ "$AF_INSTALL" = npm ]; then
+    # Reinstalling the same tarball restores the same bytes, so the cdhash the
+    # Automation grant is keyed to has not moved: there must be NO re-prompt.
+    expect n "Did an Automation prompt appear AGAIN on that click?" \
+             "G9 same version keeps its Automation grant"
+  else
+    ask "Did exactly ONE Automation prompt appear (and nothing else)?"
+    case "$ANS" in
+      y) PC_AUTOMATION=$((PC_AUTOMATION+1)); pass "G9 exactly one Automation re-prompt (expected tradeoff)" ;;
+      s) skip "G9 re-prompt (skipped)" ;;
+      *) fail "G9 expected exactly one Automation re-prompt and nothing else" ;;
+    esac
+  fi
   expect n "Did any Accessibility / Screen Recording / Input Monitoring prompt appear?" "G9 no forbidden prompts post-rebuild"
   if poll_frontmost "Terminal" 15; then pass "G9 click focuses Terminal post-rebuild"; else fail "G9 frontmost=\"$FRONT\" expected Terminal"; fi
 }

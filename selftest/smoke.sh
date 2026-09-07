@@ -152,7 +152,7 @@ done
 echo
 echo "passed=$PASS failed=$FAIL id=$ID"
 echo "events: $HOME/Library/Logs/agentfocus/events.jsonl"
-echo "last-focus: /tmp/agentfocus-last-focus.json"
+echo "last-focus: ~/.cache/agentfocus/selftest-last-focus.json"
 echo "registry: $HOME/Library/Application Support/agentfocus/registry/${ID}.json"
 
 if [ "$FAIL" -gt 0 ]; then

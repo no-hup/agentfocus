@@ -4,9 +4,11 @@ A few-percent error rate is acceptable by design — this file documents the kno
 edges so contributors can pick them off. Security/injection bugs are NOT on this
 list: those are fixed in code (execFile everywhere, input validation), not tolerated.
 
-The helper app is ad-hoc signed, so macOS re-asks for Automation once after every
-rebuild or upgrade. That is expected, documented behaviour (see README), not a bug
-report — `agentfocus doctor` prints a reminder about it.
+The helper app is ad-hoc signed, so macOS re-asks for Automation once after each
+version upgrade (the grant is keyed to the signature). Re-running `init` on the same
+version does not re-prompt — released builds are identical bytes for every user — but a
+build from source re-signs every time and so re-prompts every time. Expected, documented
+behaviour (see README), not a bug report — `agentfocus doctor` prints a reminder.
 
 ## Correctness tradeoffs (deliberately deferred)
 
@@ -26,6 +28,20 @@ report — `agentfocus doctor` prints a reminder about it.
 - **Registry read-modify-write races**: a `Stop`/`Notification` emit and a
   `focus-next` can interleave with no file lock; worst case a `waiting` flag is
   briefly wrong. Self-heals on the next event.
+- **Banners are suppressed for sessions that were already waiting when the helper
+  started.** A helper that has just launched (upgrade, crash, login) treats everything
+  already in the registry as already announced, so a restart cannot fire a burst of
+  re-alerts — measured at 20 on this machine before the fix. Rows written in the last
+  60 seconds are exempt, because `emit.js` writes the registry and *then* launches the
+  helper and that banner is the point. Cost: if the helper dies and restarts in the same
+  minute a genuinely new event lands, that one banner is lost; the menu-bar count and
+  ⌥⌘A still show it.
+- **`focus-next` still accepts a degraded adapter in its first pass.** Adapters now
+  report `hit`/`miss`/`degraded` honestly, but the exact-only first pass only consults
+  that for the editor fallback path, not for adapter-backed terminals — the adapter has
+  already activated its app by the time we read the verdict, so refusing afterwards would
+  just add a second app switch. A VS Code integrated-terminal session whose folder is
+  closed can therefore still swallow the hotkey ahead of an exactly-focusable one.
 
 ## Event coverage
 
@@ -51,18 +67,27 @@ report — `agentfocus doctor` prints a reminder about it.
   (best-effort), so `focus-next` and the hotkey won't pick the exact tab there.
   WezTerm/kitty have no focus adapter yet (identity is captured, unused).
 - **iTerm2 exact-tab focus is unverified on hardware**: the adapter matches
-  `id of session` against `ITERM_SESSION_ID`; this equivalence hasn't been proven
-  on a real iTerm install. Terminal.app (tty) and Ghostty (OSC) are verified.
+  `id of session` against the UUID *suffix* of `ITERM_SESSION_ID` (the full
+  `wNtMpK:UUID` form can never equal iTerm's bare-UUID id, so it always missed).
+  The suffix equivalence still hasn't been proven on a real iTerm install.
+  Terminal.app (tty) and Ghostty (OSC) are verified.
 - **JetBrains / Neovim / Zed**: no adapters yet. Contributions welcome.
 - **Cursor / Windsurf / VSCodium**: supported at **window level only** — emit.js
   captures the editor's `.app` name from the VS Code env and the adapter raises that
   fork's window for the project folder (falls back to VS Code if it can't be
-  determined). The `vscode-ext/` extension adds best-effort tab-exact focus on top,
-  with the races listed above.
-- **Editor-native agent panels are out of scope**: Cursor Composer, Copilot Chat,
-  the VS Code Claude panel. They run no shell, so there is no hook to fire, no
-  `Stop` event and no tty — nothing ever reaches the registry. Only agents run in a
-  terminal (integrated terminals included) are visible to agentfocus.
+  determined). It only ever passes `open` a folder the editor's own window state
+  confirms is open (`adapters/editor_window.js`), because `open -a <editor> <folder>`
+  SPAWNS a window for anything else; unconfirmed → app-level activate. Residual
+  ceiling: closing a window doesn't rewrite that state, so a just-closed folder can
+  still read as open. The `vscode-ext/` extension adds best-effort tab-exact focus
+  on top, with the races listed above.
+- **Editor panels are window-level only, and third-party panels not at all.**
+  Claude Code's own VS Code panel *does* register (it runs the agent as a
+  subprocess, so the hook fires) — it is in fact the most common kind of row. But
+  it has no shell, so no tty and no terminal identity: the best any adapter can do
+  is raise the right editor window for that folder, never a specific tab or panel.
+  Panels belonging to other tools — Cursor Composer, Copilot Chat — fire no hook of
+  ours at all and stay invisible.
 - **tmux: pane ≠ tab**: inside tmux the tty we recover from the ancestor PID chain
   is the *pane* pty, which no Terminal.app tab has. The adapter reports `miss` and
   degrades to app-level activate, so you land in the right terminal app but not the

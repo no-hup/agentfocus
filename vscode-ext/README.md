@@ -10,7 +10,7 @@ Works on **VS Code, Cursor, Windsurf, VSCodium** (standard VS Code extension API
    ```json
    { "session_id": "…", "identity_handle": "<AGENTFOCUS_VSCODE_ID>" }
    ```
-4. On match → `terminal.show()` + write `/tmp/agentfocus-last-focus.json`.  
+4. On match → `terminal.show()` + write `~/.cache/agentfocus/last-focus.json`.  
    On **no match → do nothing** (never focuses `terminals[0]`).
 5. In-editor toast with **Focus Terminal** as a fallback when a request is handled.
 
@@ -43,4 +43,4 @@ Or: **Extensions: Install from Location…** and select this `vscode-ext` folder
 | Path | Role |
 |---|---|
 | `~/.cache/agentfocus/focus-request.json` | Input from agy |
-| `/tmp/agentfocus-last-focus.json` | Output for selftest |
+| `~/.cache/agentfocus/last-focus.json` | Debug breadcrumb (not shared `/tmp`: a predictable name there can be pre-created as a symlink by another user) |

@@ -1,0 +1,47 @@
+{
+  "name": "agentfocus",
+  "version": "0.1.0",
+  "description": "When your terminal coding agent needs you, the notification takes you to the exact tab. macOS, fully local.",
+  "keywords": [
+    "claude-code",
+    "notifications",
+    "macos",
+    "terminal",
+    "focus",
+    "coding-agent"
+  ],
+  "homepage": "https://github.com/no-hup/agentfocus",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/no-hup/agentfocus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/no-hup/agentfocus/issues"
+  },
+  "license": "MIT",
+  "bin": {
+    "agentfocus": "bin/agentfocus"
+  },
+  "files": [
+    "bin/agentfocus",
+    "hook/",
+    "adapters/",
+    "libexec/",
+    "integrations/README.md",
+    "integrations/_emit.js",
+    "integrations/opencode-agentfocus.js",
+    "integrations/shim.js",
+    "README.md",
+    "KNOWN-ISSUES.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
+  "scripts": {
+    "prepack": "helper/build.sh libexec"
+  }
+}

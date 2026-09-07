@@ -7,7 +7,7 @@ set -euo pipefail
 LOG_DIR="${HOME}/Library/Logs/agentfocus"
 REG_DIR="${HOME}/Library/Application Support/agentfocus/registry"
 EVENTS="${LOG_DIR}/events.jsonl"
-LAST_FOCUS="/tmp/agentfocus-last-focus.json"
+LAST_FOCUS="${HOME}/.cache/agentfocus/selftest-last-focus.json"
 
 usage() {
   cat <<'EOF'
@@ -26,7 +26,7 @@ ts_now() {
 }
 
 ensure_dirs() {
-  mkdir -p "$LOG_DIR" "$REG_DIR"
+  mkdir -p "$LOG_DIR" "$REG_DIR" "$(dirname "$LAST_FOCUS")"
 }
 
 # Append one JSONL event. Values passed as env-ish args; uses node for safe JSON (no Date.now).
@@ -116,9 +116,9 @@ cmd_notify() {
   # Tahoe-safe-ish path that works on this Mac: osascript display notification
   # (Real product will use UNUserNotificationCenter in a helper app.)
   local ok="true" detail="osascript display notification"
-  if ! osascript -e "display notification $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$BODY") with title $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$TITLE") subtitle $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "id=$ID")" 2>/tmp/agentfocus-notify.err; then
+  if ! osascript -e "display notification $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$BODY") with title $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$TITLE") subtitle $(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "id=$ID")" 2>${TMPDIR:-/tmp}/agentfocus-notify.err; then
     ok="false"
-    detail="osascript failed: $(tr '\n' ' ' </tmp/agentfocus-notify.err)"
+    detail="osascript failed: $(tr '\n' ' ' <${TMPDIR:-/tmp}/agentfocus-notify.err)"
   fi
   append_event "notify" "$ID" "$app" "$ok" "$detail"
   if [ "$ok" != "true" ]; then
@@ -149,10 +149,10 @@ cmd_focus() {
 
   local ok="true" detail="activated:$open_name"
   # Prefer `open -a` (no Automation TCC). Fallback to osascript activate.
-  if ! open -a "$open_name" 2>/tmp/agentfocus-focus.err; then
-    if ! osascript -e "tell application \"$open_name\" to activate" 2>>/tmp/agentfocus-focus.err; then
+  if ! open -a "$open_name" 2>${TMPDIR:-/tmp}/agentfocus-focus.err; then
+    if ! osascript -e "tell application \"$open_name\" to activate" 2>>${TMPDIR:-/tmp}/agentfocus-focus.err; then
       ok="false"
-      detail="activate failed: $(tr '\n' ' ' </tmp/agentfocus-focus.err)"
+      detail="activate failed: $(tr '\n' ' ' <${TMPDIR:-/tmp}/agentfocus-focus.err)"
     fi
   fi
 

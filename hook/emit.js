@@ -57,7 +57,46 @@ process.stdin.on('end', () => {
 
     const cwd = payload.cwd || process.cwd();
     const title = path.basename(cwd) || 'agent';
-    const message = payload.message || "needs input";
+
+    // Previous row, best-effort: a Stop woken by a finished background agent can
+    // only NAME that agent by diffing against the last Stop's list. Missing or
+    // corrupt is the normal first-event case, not an error.
+    let prev = null;
+    try { prev = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch(e) {}
+
+    // Banner text. A Stop with background work still in flight must not read as
+    // a plain "done", and the Stop that a finishing background agent wakes must
+    // say which one. Sanitised and length-capped once, here, for all consumers.
+    // ponytail: `bg` is rewritten on EVERY emit, so one finish is announced at
+    // most once; the freshness gate stops an abandoned row announcing stale news.
+    const FRESH_BG_MS = 30 * 60 * 1000;
+    const clean = (s) => String(s == null ? '' : s).replace(/[;\x00-\x1F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+    // Statuses are running|pending|completed|failed|killed; only the first two
+    // are outstanding. Absent on older Claude Code → empty → plain "needs input".
+    const bg = (payload.background_tasks || [])
+        .filter(t => t.status === 'running' || t.status === 'pending')
+        .map(t => ({ id: t.id, description: clean(t.description) || 'background task' }));
+
+    function reasonFor() {
+        if (payload.hook_event_name === 'Stop') {
+            const live = new Set(bg.map(t => t.id));
+            const fresh = prev && (Date.now() - (prev.ts || 0)) < FRESH_BG_MS;
+            const done = (fresh && Array.isArray(prev.bg)) ? prev.bg.filter(t => !live.has(t.id)) : [];
+            if (done.length) {
+                return `Background agent finished: ${done[0].description}` +
+                       (done.length > 1 ? ` (+${done.length - 1} more)` : '') +
+                       (bg.length ? ` (+${bg.length} still running)` : '');
+            }
+            if (bg.length) {
+                const names = bg.map(t => t.description);
+                const inline = bg.length <= 2 && names.every(n => n.length <= 40);
+                return `done — ${bg.length} background task${bg.length > 1 ? 's' : ''} running` +
+                       (inline ? `: ${names.join(', ')}` : '');
+            }
+        }
+        return payload.message || "needs input";
+    }
+    const message = clean(reasonFor());
 
     // Which editor app to raise (VS Code / Cursor / Windsurf / VSCodium). VS Code
     // family exports its bundle path in VSCODE_* vars; pull the .app name so the
@@ -70,9 +109,17 @@ process.stdin.on('end', () => {
         }
     }
 
-    // Native OSC or osascript?
-    const isOscNative = ['Ghostty', 'iTerm.app', 'WezTerm', 'kitty'].includes(termProgram) ||
-                        process.env.ITERM_SESSION_ID || ghosttyKey || process.env.KITTY_WINDOW_ID || process.env.WEZTERM_PANE;
+    // Native OSC or osascript? A terminal that renders no OSC 9/777 must never be
+    // marked osc_native on the strength of an env var alone: launch VS Code from a
+    // Ghostty shell and every session inside it inherits GHOSTTY_*, which would
+    // silence the helper while the editor renders nothing — no banner, no error
+    // anywhere. Editor-hosted sessions with no TERM_PROGRAM (the VS Code panel)
+    // are the same case: their output reaches no terminal emulator at all.
+    const term = termProgram.toLowerCase();
+    const noOsc = term === 'vscode' || term === 'apple_terminal' || (term === 'unknown' && !!editorApp);
+    const isOscNative = !noOsc &&
+        (['ghostty', 'iterm.app', 'wezterm', 'kitty'].includes(term) ||   // lower-cased: Ghostty reports "ghostty"
+         !!(process.env.ITERM_SESSION_ID || ghosttyKey || process.env.KITTY_WINDOW_ID || process.env.WEZTERM_PANE));
 
     const data = {
         session_id: sessionId,
@@ -83,6 +130,8 @@ process.stdin.on('end', () => {
         tty: ancestorTty(), // recovered from parent claude/shell — see ancestorTty()
         cwd: cwd,
         title: title,
+        reason: message,   // banner body — the helper posts this verbatim
+        bg: bg,            // in-flight background tasks, diffed by the next Stop
         waiting: true,
         ts: Date.now()
     };
@@ -92,6 +141,20 @@ process.stdin.on('end', () => {
     fs.fchmodSync(fd, 0o600);
     fs.writeSync(fd, JSON.stringify(data, null, 2));
     fs.closeSync(fd);
+
+    // Nothing ever deleted a row, so the registry only grew: the helper re-reads
+    // every one of them every 2s and the CLI parses them on every focus-next.
+    // Rows are already invisible to both at 6h; 7 days is a wide margin, and
+    // mtime means nothing has to be parsed to decide. A live session that has
+    // been silent that long simply rewrites its row on the next event.
+    try {
+        const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        for (const f of fs.readdirSync(registryDir)) {
+            if (!f.endsWith('.json')) continue;
+            const p = path.join(registryDir, f);
+            try { if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p); } catch(e) {}
+        }
+    } catch(e) {}
 
     // Keep the helper alive (menu-bar queue + hotkey + UN banners). `open -g`
     // is idempotent and never steals focus; registry-write-then-launch means

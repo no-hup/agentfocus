@@ -1,10 +1,14 @@
 const { execSync } = require('child_process');
 const data = JSON.parse(process.argv[2]);
-const id = String(data.identity_handle || '');
+// ITERM_SESSION_ID is "wNtMpK:UUID" but iTerm's AppleScript `id of session` is
+// the bare UUID, so compare against the suffix — the full value can never match
+// and every lookup silently degraded to app-level activate. Splitting is a no-op
+// when there is no prefix.
+const id = String(data.identity_handle || '').split(':').pop();
 
-// ITERM_SESSION_ID looks like "w0t0p0:UUID". Validate before interpolating so a
-// hostile env value can't break out of the AppleScript string / inject a command.
-if (!id || id === 'unknown' || !/^[A-Za-z0-9_.:-]+$/.test(id)) {
+// Validate before interpolating so a hostile env value can't break out of the
+// AppleScript string / inject a command.
+if (!id || id === 'unknown' || !/^[A-Za-z0-9_.-]+$/.test(id)) {
     try { execSync('osascript -', { input: 'tell application "iTerm" to activate' }); } catch {}
     process.stdout.write('miss(no-id)');
     process.exit(0);

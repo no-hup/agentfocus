@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Assert "correct tab/pane" by surface type.
 # Usage: check_tab.sh <id> [--app <app>] [--hint <hint>]
-# If --app/--hint omitted, reads registry + /tmp/agentfocus-last-focus.json.
+# If --app/--hint omitted, reads registry + $HOME/.cache/agentfocus/selftest-last-focus.json.
 set -euo pipefail
 
 REG_DIR="${HOME}/Library/Application Support/agentfocus/registry"
-LAST_FOCUS="/tmp/agentfocus-last-focus.json"
+LAST_FOCUS="${HOME}/.cache/agentfocus/selftest-last-focus.json"
 
 if [ $# -lt 1 ] || [ -z "${1:-}" ]; then
   echo "FAIL check_tab: usage: check_tab.sh <id> [--app <app>] [--hint <hint>]" >&2
@@ -74,8 +74,8 @@ case "$APP" in
 
   iterm|iterm2)
     # Automation TCC may prompt / fail
-    TTY_NOW="$(osascript -e 'tell application "iTerm2" to get tty of current session of current window' 2>/tmp/agentfocus-check-tab.err || \
-               osascript -e 'tell application "iTerm" to get tty of current session of current window' 2>>/tmp/agentfocus-check-tab.err || true)"
+    TTY_NOW="$(osascript -e 'tell application "iTerm2" to get tty of current session of current window' 2>${TMPDIR:-/tmp}/agentfocus-check-tab.err || \
+               osascript -e 'tell application "iTerm" to get tty of current session of current window' 2>>${TMPDIR:-/tmp}/agentfocus-check-tab.err || true)"
     if [ -z "$TTY_NOW" ]; then
       # Fall back to last-focus control-plane assert
       if [ -f "$LAST_FOCUS" ]; then
@@ -93,7 +93,7 @@ case "$APP" in
         ' "$ID" "$LAST_FOCUS"
         exit $?
       fi
-      echo "FAIL check_tab: iTerm AppleScript failed: $(tr '\n' ' ' </tmp/agentfocus-check-tab.err 2>/dev/null)" >&2
+      echo "FAIL check_tab: iTerm AppleScript failed: $(tr '\n' ' ' <${TMPDIR:-/tmp}/agentfocus-check-tab.err 2>/dev/null)" >&2
       exit 1
     fi
     if [ -n "$HINT" ] && [ "$TTY_NOW" != "$HINT" ] && [ "/dev/$TTY_NOW" != "$HINT" ] && [ "$TTY_NOW" != "/dev/${HINT#/dev/}" ]; then
@@ -109,7 +109,7 @@ case "$APP" in
     ;;
 
   terminal|terminal.app|Apple_Terminal)
-    TTY_NOW="$(osascript -e 'tell application "Terminal" to get tty of selected tab of front window' 2>/tmp/agentfocus-check-tab.err || true)"
+    TTY_NOW="$(osascript -e 'tell application "Terminal" to get tty of selected tab of front window' 2>${TMPDIR:-/tmp}/agentfocus-check-tab.err || true)"
     if [ -z "$TTY_NOW" ]; then
       if [ -f "$LAST_FOCUS" ]; then
         node -e '
@@ -126,7 +126,7 @@ case "$APP" in
         ' "$ID" "$LAST_FOCUS"
         exit $?
       fi
-      echo "FAIL check_tab: Terminal AppleScript failed: $(tr '\n' ' ' </tmp/agentfocus-check-tab.err 2>/dev/null)" >&2
+      echo "FAIL check_tab: Terminal AppleScript failed: $(tr '\n' ' ' <${TMPDIR:-/tmp}/agentfocus-check-tab.err 2>/dev/null)" >&2
       exit 1
     fi
     if [ -n "$HINT" ]; then

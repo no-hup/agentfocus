@@ -21,7 +21,10 @@ const APP = 'agentfocus';
 const ENV_KEY = 'AGENTFOCUS_VSCODE_ID';
 const CACHE_DIR = path.join(os.homedir(), '.cache', APP);
 const FOCUS_REQUEST = path.join(CACHE_DIR, 'focus-request.json');
-const LAST_FOCUS = '/tmp/agentfocus-last-focus.json';
+// Debug breadcrumb only — kept beside the other cache files, never in shared
+// /tmp: a predictable name there can be pre-created as a symlink by any other
+// user on the machine, and this write would follow it.
+const LAST_FOCUS = path.join(CACHE_DIR, 'last-focus.json');
 
 /** identity_handle → live terminal */
 const terminalsById = new Map<string, vscode.Terminal>();

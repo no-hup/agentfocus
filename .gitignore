@@ -2,3 +2,6 @@ vscode-ext/node_modules
 vscode-ext/out
 helper/build/
 *.vsix
+libexec/
+*.tgz
+.vscode/

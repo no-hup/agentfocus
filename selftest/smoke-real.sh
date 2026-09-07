@@ -216,8 +216,8 @@ else
 fi
 
 # --- optional list ---
-if "$CLI" list >/tmp/agentfocus-smoke-real-list.txt 2>/dev/null; then
-  if grep -q "$SESSION_ID" /tmp/agentfocus-smoke-real-list.txt 2>/dev/null; then
+if "$CLI" list >${TMPDIR:-/tmp}/agentfocus-smoke-real-list.txt 2>/dev/null; then
+  if grep -q "$SESSION_ID" ${TMPDIR:-/tmp}/agentfocus-smoke-real-list.txt 2>/dev/null; then
     pass "list includes session_id"
   else
     note "NOTE  list ran but session_id not grepped (format may differ) — not a hard fail"

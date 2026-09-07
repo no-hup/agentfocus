@@ -34,15 +34,25 @@ helper stays quiet and you never get two banners for one event.
 
 ## Install
 
+You need two things first: **macOS 13 (Ventura) or newer** and **Node 18+** (the hooks and
+CLI are Node — you have it if you installed Claude Code with npm; the native installer
+does not bring it). `agentfocus init` checks both before it touches anything and tells you
+which one is missing.
+
+The menu-bar helper ships **prebuilt** — universal (Apple Silicon and Intel), with a
+macOS 13 floor — so there is no compiler step. The Xcode Command Line Tools are needed
+only if you build from source.
+
+Then, one command:
+
 ```sh
-brew install --HEAD no-hup/agentfocus/agentfocus
-agentfocus init
+npx agentfocus init
 ```
 
-*Landing in this release.* Until the first tagged release, brew installs from HEAD
-(`--HEAD` required; Homebrew no longer installs loose formula files).
-Re-run `agentfocus init` after a `brew upgrade` — it refreshes the runtime copy and the
-helper app.
+To upgrade, run the same thing again with `npx agentfocus@latest init`. `agentfocus doctor`
+warns you when the installed runtime is older than the CLI.
+
+Homebrew is planned but not live yet — see [MUST-DO.md](MUST-DO.md).
 
 **From source (dev):**
 
@@ -79,9 +89,11 @@ which needs none of them. There is no helper daemon running as root, no login sh
 hooking, nothing outside your home directory.
 
 **One caveat, stated plainly:** the helper is ad-hoc signed (no paid Developer ID
-signature yet). macOS ties an Automation grant to the exact signature, so **after a rebuild
-or an upgrade you get the Automation prompt once more.** That's an accepted v1 tradeoff,
-not a bug — `agentfocus doctor` prints a reminder about it.
+signature yet). macOS ties an Automation grant to the exact signature, so **upgrading to a
+new version asks once more.** Re-running `init` on the same version does not: every user
+of a release gets the identical binary, so the signature does not move. (A build from
+source re-signs on every rebuild, so it re-prompts every time.) That's an accepted v1
+tradeoff, not a bug — `agentfocus doctor` prints a reminder about it.
 
 ## Supported agents
 
@@ -112,9 +124,25 @@ Chat, the VS Code Claude panel. They don't run in a shell, so there's no hook to
 
 **⌥⌘A** focuses the next waiting session from anywhere.
 
-The menu-bar bell badges itself when something is waiting. Open it for the queue — each
-waiting session shows as `<folder> (<terminal>, <age>m)`, click one to jump straight to it.
-Below that: **Focus Next**, a **Start at Login** toggle, and **Quit**.
+The menu-bar bell badges itself and shows **how many** agents are waiting, so you can read
+the queue without opening anything. Open it and the first line is `N waiting · oldest Nm`;
+below that each waiting session shows as `<folder> (<terminal>, <age>m)` — click one to
+jump straight to it. Then: **Focus Next**, **Focus on Return**, a **Start at Login**
+toggle, and **Quit**.
+
+There is no "running" count, deliberately: a session that is not waiting might be working
+or might have exited hours ago, and the registry cannot tell those two apart. Counting
+them would mean guessing.
+
+### Focus on Return
+
+Walk away, come back, and the agent that has been waiting longest is already in front of
+you. It fires once per return — after five minutes away — and only when you are actually
+back: not at the lock screen, and not when another user is on the console. On by default;
+turn it off from the menu.
+
+It reads the system idle timer straight from the IO registry (the same number
+`ioreg -c IOHIDSystem` prints), which needs no permission of any kind.
 
 ## Doctor
 
@@ -134,25 +162,20 @@ human-in-the-loop run on a brand-new macOS account.
 
 ## Uninstall
 
-Brew:
-
 ```sh
-brew uninstall agentfocus
+agentfocus uninstall           # add --purge to delete the logs too
 ```
 
-Then clean up what lives in your home directory (either path):
+That stops the helper, unregisters the login item, removes our three hook entries from
+`~/.claude/settings.json` (backing it up first, and leaving every other hook alone), and
+deletes `~/Applications/AgentFocus.app`, `~/.local/share/agentfocus` and
+`~/.cache/agentfocus`. Everything AgentFocus creates lives in your home directory, so
+that is the whole removal — no sudo, nothing left behind.
 
-```sh
-rm -rf ~/Applications/AgentFocus.app          # quit it from the menu bar first
-rm -rf ~/.local/share/agentfocus ~/.cache/agentfocus ~/Library/Logs/agentfocus
-```
-
-Finally remove the three `agentfocus` hook entries (`Stop`, `Notification`,
-`UserPromptSubmit`) from `~/.claude/settings.json` — or just restore the
-`settings.json.agentfocus-backup-*` that install day left next to it.
-
-If you want the Automation grant gone too: System Settings → Privacy & Security →
-Automation → AgentFocus.
+Two things it deliberately does not touch, and tells you so: the Automation grant
+(System Settings → Privacy & Security → Automation → AgentFocus), and any
+`integrations/` hooks you added by hand to another agent's config — it lists the
+file paths instead of editing another tool's settings.
 
 ## License
 
