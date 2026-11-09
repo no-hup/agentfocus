@@ -33,10 +33,14 @@ try {
 // the specific one, but only when the editor's own state confirms it has this
 // session's folder open (deepest ancestor, never $HOME or / — editor_window.js).
 // On any doubt we keep the activate-only behaviour: a wrong raise is worse.
+// raiseWindow() may decline when another raise is still inside the editor's
+// open-file batch window: two raises there merge both windows into one untitled
+// workspace. Declining degrades to the activate above, which opens no path.
 let folder = null;
 try {
-    folder = require('./editor_window.js').openWindowFor(app, data.cwd);
-    if (folder) execFileSync('open', ['-a', app, folder]);
+    const ew = require('./editor_window.js');
+    folder = ew.openWindowFor(app, data.cwd);
+    if (folder && !ew.raiseWindow(app, folder)) folder = null;
 } catch (e) { folder = null; }
 
 // Say which of the two we actually did, as the FIRST token, so bin/agentfocus

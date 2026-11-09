@@ -50,9 +50,35 @@ run_case() { # run_case <label> <toggle-on?> <expected-fires>
   check "$1" "$3" "$(( $(fires) - before ))"
 }
 
+returns() { grep -c "return from idle -> focus" "$LOG" 2>/dev/null || echo 0; }
+clicks()  { grep -c "click $ID" "$LOG" 2>/dev/null || echo 0; }
+
+# Returning to the Mac BY CLICKING A BANNER is one act, not two. The click is
+# itself the input that ends the idle period, so before userFocus() consumed the
+# idle edge the next poll fired a second, automatic focus at a DIFFERENT session
+# ~instantly — and two window raises inside VS Code's 100ms open-file batch are
+# merged into one untitled workspace, destroying both windows. Not a rare race:
+# the guaranteed outcome of step away → agent finishes → come back and click.
+run_click_case() {
+  defaults write com.agentfocus.helper returnAfter -float 10
+  defaults write com.agentfocus.helper focusOnReturn -bool true
+  pkill -f 'AgentFocus.app/Contents/MacOS/AgentFocus' 2>/dev/null
+  open -g "$HOME/Applications/AgentFocus.app"; sleep 3
+  arm; local r0 c0; r0="$(returns)"; c0="$(clicks)"
+  echo ""
+  echo "  >>> A banner titled 'idle-selftest' should appear."
+  echo "  >>> HANDS OFF for 15 seconds — do NOT dismiss it. Starting now..."
+  sleep 15
+  echo "  >>> Now CLICK THE BANNER (your first input must be that click), then wait."
+  sleep 10
+  check "banner click focuses once"                1 "$(( $(clicks)  - c0 ))"
+  check "banner click fires NO auto focus-on-return" 0 "$(( $(returns) - r0 ))"
+}
+
 echo "=== focus-on-return ==="
 run_case "toggle ON  → fires exactly once per return" true 1
 run_case "toggle OFF → never fires"                   false 0
+run_click_case
 
 echo "---"; echo "$PASS passed, $FAIL failed"
 echo "Not covered here (needs a second pair of eyes): locking the screen, waiting"

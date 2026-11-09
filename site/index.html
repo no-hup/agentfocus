@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentFocus — the notification opens the right terminal tab</title>
+  <meta name="description" content="AgentFocus is a local macOS menu-bar app. When a terminal coding agent finishes or asks a question, clicking the notification opens that tab.">
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font: 18px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      background: #f6f4ef;
+      color: #1c1915;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #161411; color: #f3efe6; }
+      a { color: #f0c36a; }
+      .card, header { border-color: #3a342c; }
+      code, .cmd { background: #241f1a; }
+    }
+    a { color: #8a4b08; }
+    header, main { max-width: 42rem; margin: 0 auto; padding: 1.25rem 1.25rem 0; }
+    header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+    h1 { font-size: 2rem; line-height: 1.15; letter-spacing: -0.03em; margin: 1.5rem 0 0.75rem; }
+    h2 { font-size: 1.15rem; margin: 2rem 0 0.4rem; }
+    p, li { max-width: 40rem; }
+    ul { padding-left: 1.2rem; }
+    .cmd, code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+      background: #efeae2;
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    .cmd { display: block; padding: 0.75rem 1rem; overflow-x: auto; }
+    footer { max-width: 42rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; color: #5c564c; }
+    @media (prefers-color-scheme: dark) {
+      footer { color: #b7ad9f; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>AgentFocus</strong>
+    <a href="https://github.com/no-hup/agentfocus">Source</a>
+  </header>
+  <main>
+    <h1>When a coding agent needs you, the click opens that tab.</h1>
+    <p>You leave a few agents running in terminal tabs. One finishes, or it asks a question. A banner shows up. You click it, and the wrong window comes forward, or nothing does. Then you hunt for the tab that was asking.</p>
+    <p>AgentFocus is a menu-bar app for that, on macOS 13 or newer. A hook writes one small file on your Mac when the agent is waiting. The app posts the banner. You click it, and you land on the session that asked.</p>
+
+    <h2>What a click does</h2>
+    <ul>
+      <li>Terminal.app: the exact tab, matched by tty.</li>
+      <li>VS Code, Cursor, Windsurf, and VSCodium: the window for that project folder.</li>
+      <li>Ghostty, kitty, and WezTerm: those apps notify on their own. AgentFocus stays quiet so you do not get two banners.</li>
+      <li>Option-Command-A focuses the next waiting session from anywhere.</li>
+    </ul>
+    <p>It stays on the machine. No account, no network, no telemetry. It does not ask for Accessibility, Screen Recording, or Input Monitoring.</p>
+
+    <h2>Who it is for</h2>
+    <p>People who run coding agents in a terminal on a Mac. Claude Code is wired in today. Codex CLI, Copilot CLI, Goose, and OpenCode have shims. Agents that live only inside an editor chat panel are out of scope, because there is no shell hook and no tab to open.</p>
+
+    <h2>Install</h2>
+    <p>The npm package is not published yet. Clone the repo and run the installer. You need Node 18 or newer.</p>
+    <code class="cmd">git clone https://github.com/no-hup/agentfocus
+cd agentfocus
+./install.sh</code>
+    <p><code>./install.sh</code> runs <code>agentfocus init</code>. That copies the CLI and hooks into your home folder, merges the Claude Code hooks into <code>~/.claude/settings.json</code> without removing your other hooks, and launches the menu-bar app. Homebrew is written but not a live tap yet.</p>
+
+    <h2>Limits, stated as they are</h2>
+    <ul>
+      <li>iTerm2 exact-session focus is implemented and not yet verified on a machine that has iTerm2.</li>
+      <li>tmux, SSH remotes, and devcontainers are not bridged.</li>
+      <li>The helper is ad-hoc signed. Upgrading to a new version asks for the Automation permission once more.</li>
+    </ul>
+  </main>
+  <footer>
+    <p>MIT license. Questions and bugs go to <a href="https://github.com/no-hup/agentfocus/issues">GitHub issues</a>. A contact address on this site’s own domain is not set up yet.</p>
+  </footer>
+</body>
+</html>

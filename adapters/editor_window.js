@@ -13,6 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 // Application Support dir ≠ .app name for VS Code itself. The forks (Cursor,
 // Windsurf, VSCodium) do use their app name, so this map holds only exceptions.
@@ -67,6 +68,65 @@ function openWindowFor(editorApp, cwd) {
     }
 }
 
+// Raising a window is the one destructive thing this tool does, so it lives here
+// — the one module every caller already goes through — rather than in each of the
+// two places that used to run `open` themselves.
+//
+// VS Code's main process buffers macOS open-file events on a 100ms SLIDING
+// debounce (each new path clears and re-arms the timer), then hands the whole
+// batch to windowsMainService.open(). That call merges a batch containing more
+// than one folder into an untitled multi-root workspace:
+//
+//     if (!addMode && !removeMode && explicit) {
+//         const folders = paths.filter(isFolder);
+//         if (folders.length > 1) createUntitledWorkspace(folders)   // <-- here
+//     }
+//
+// So two window raises landing within ~100ms of each other do not raise two
+// windows: they DESTROY both, replacing them with one "Untitled (Workspace)".
+// Verified on VS Code 1.136.1: two back-to-back `open -a` calls merged, the same
+// two spaced 500ms apart did not. Nothing about this is VS Code-specific enough
+// to be a bug in VS Code — an app is entitled to batch its open events — so the
+// gap has to be enforced on our side.
+//
+// ponytail: 500ms is a 5x margin over the observed 100ms debounce, to cover
+// Apple Event delivery jitter. Widen it if a future VS Code lengthens the
+// debounce; the failure mode of too-small is a destroyed window layout.
+const RAISE_GAP_MS = 500;
+
+// Claim the right to raise, atomically and across PROCESSES — the colliding
+// raises come from separate `agentfocus focus` invocations, so an in-process
+// flag would never have seen them. mkdir is the atomic test-and-set, and its
+// own mtime is the timestamp, so this is one syscall and no lockfile parsing.
+// The claim is never released: it EXPIRES, which is what "no two raises within
+// 500ms" actually means.
+function claimRaise(gapMs = RAISE_GAP_MS, now = Date.now()) {
+    const lock = path.join(process.env.HOME || '/tmp', '.cache/agentfocus/raise.lock');
+    try { fs.mkdirSync(path.dirname(lock), { recursive: true }); } catch (e) { return true; }
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try { fs.mkdirSync(lock); return true; }                  // won the claim
+        catch (e) {
+            if (e.code !== 'EEXIST') return true;                 // fail OPEN: a broken
+            let age;                                              // lock must never cost
+            try { age = now - fs.statSync(lock).mtimeMs; }        // you a focus
+            catch (e2) { continue; }                              // vanished under us
+            if (age < gapMs) return false;                        // someone just raised
+            try { fs.rmdirSync(lock); } catch (e2) {}             // expired -> retake it
+        }
+    }
+    return true;
+}
+
+// Raise `folder`'s window, unless another raise is still inside the merge window.
+// Returns false when it declined, and the caller must then fall back to a plain
+// app activate — which is safe at any rate, because `activate` opens no paths and
+// so can never enter VS Code's batch.
+function raiseWindow(editorApp, folder) {
+    if (!claimRaise()) return false;
+    execFileSync('open', ['-a', editorApp, folder]);
+    return true;
+}
+
 // Self-check / debugging: `node editor_window.js "<App Name>" [cwd]` prints the
 // folders that editor really has open, and what a session in cwd resolves to.
 // selftest/editor-window.sh asserts against this against the live machine — a
@@ -80,4 +140,4 @@ if (require.main === module) {
     if (process.argv[3]) console.log(`match\t${openWindowFor(app, process.argv[3]) || ''}`);
 }
 
-module.exports = { openWindowFor, openFolders };
+module.exports = { openWindowFor, openFolders, raiseWindow, claimRaise, RAISE_GAP_MS };

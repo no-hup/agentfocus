@@ -238,15 +238,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
     }
 
-    @objc func focusNext() { runCLI(["focus-next"]) }
-    @objc func focusSession(_ item: NSMenuItem) { runCLI(["focus", item.representedObject as! String]) }
+    /// A focus YOU asked for also services the return-from-idle, so it must
+    /// consume that edge. Clicking a banner (or pressing the hotkey) is itself the
+    /// input that ends the idle period, so the very next poll would otherwise see
+    /// "user is back" and fire a SECOND, automatic focus at a different session —
+    /// not a rare race but the guaranteed outcome of the ordinary path: step away,
+    /// an agent finishes, come back, click the banner. Two window raises land
+    /// together and the editor merges both windows into one untitled workspace.
+    func userFocus(_ args: [String]) {
+        idleArmed = false
+        runCLI(args)
+    }
+
+    @objc func focusNext() { userFocus(["focus-next"]) }
+    @objc func focusSession(_ item: NSMenuItem) { userFocus(["focus", item.representedObject as! String]) }
 
     // MARK: notifications
 
     func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse, withCompletionHandler h: @escaping () -> Void) {
         if let id = r.notification.request.content.userInfo["session_id"] as? String {
             log("click \(id)")
-            runCLI(["focus", id])
+            userFocus(["focus", id])
         }
         h()
     }

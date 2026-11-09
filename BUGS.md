@@ -239,6 +239,67 @@ output: delete the write, or move it under `~/.cache/agentfocus`.
 
 ---
 
+## 11. Two focuses at once MERGE your VS Code windows into one untitled workspace
+
+**STATUS: FIXED** — `adapters/editor_window.js` now owns the only `open -a <app> <folder>`
+in the tree and gates it behind a 500ms cross-process claim; user-initiated focus in the
+helper consumes the idle edge. Checked by `test/raise-gap.js` and the third case in
+`selftest/idle-return.sh`.
+
+**Symptom:** clicked a banner, and VS Code replaced the open windows with a single
+"Untitled (Workspace)". Reported as "it opened an untitled workspace for something I
+wasn't even working on".
+
+**Evidence (2026-09-08, this machine):**
+
+```
+16:10:06Z posted 002a477b…                       (shuarya-oss)
+16:10:10Z click 002a477b…                        ← the user
+16:10:10Z return from idle -> focus 76fa4346…    ← the helper, same second (stocks)
+16:10:10Z cli focus 002a477b… exit=0
+16:10:10Z cli focus 76fa4346… exit=0
+```
+
+`Code/User/workspaceStorage/47f743b1…/workspace.json` then pointed at
+`Code/Workspaces/1788883810712/` — an id that is a ms timestamp, 180ms after the two
+registry rows (`…810529`, `…810534`). Both folders were genuinely open; the adapter
+resolved both correctly. Doing the right thing twice at once is what broke it.
+
+**Root cause, two layers:**
+
+1. *Mechanism.* VS Code buffers macOS open-file events on a **100ms sliding** debounce
+   (each new path clears and re-arms the timer), then hands the batch to
+   `windowsMainService.open()`, which merges a batch of more than one folder into an
+   untitled multi-root workspace — `if (folders.length > 1) createUntitledWorkspace(...)`.
+   Verified against the shipped `main.js` of VS Code 1.136.1, then reproduced: two
+   back-to-back `open -a` calls merged two folders into `Workspaces/<ts>`; the same two
+   spaced 500ms apart did not. Nothing serialised our raises, and there were **two**
+   independent raise sites (`bin/agentfocus` for editor-panel sessions, `adapters/vscode.js`
+   for `term_program: vscode`) — the incident went through the first.
+
+2. *Why the pair fired at all.* Focus-on-return and a banner click are the SAME physical
+   act: the click is the input that ends the idle period, so the next poll saw "user is
+   back" and fired a second, automatic focus at a different session. Not a rare race —
+   the guaranteed outcome of the ordinary path (step away, agent finishes, come back,
+   click the banner). The hotkey and the menu had the same coupling.
+
+**Fix:** one raise site, gated by a claim that is atomic across processes (`mkdirSync`
+is the test-and-set; its mtime is the timestamp; it expires rather than being released),
+because the colliding raises are separate `agentfocus focus` processes. A declined claim
+degrades to `activate`, which opens no path and so can never enter the batch. In the
+helper, `userFocus()` consumes the idle edge for click, hotkey and menu.
+
+**Side-effect note:** two deliberate focuses inside 500ms now leave the second at
+app-level rather than window-level. That is the correct trade: a degraded activate is
+recoverable, a merged workspace is not.
+
+**Also found:** `ADAPTERS_DIR` is always the installed tree, never the tree the running
+`bin/agentfocus` sits in, so a CLI newer than `~/.local/share/agentfocus` is reachable —
+and it threw `ew.raiseWindow is not a function`, killing focus outright. Now degrades and
+says to run `agentfocus init`. Caught by testing, not by reading.
+
+---
+
 ## Fix order (when implementation is approved)
 
 1. **#7 + #8 first** (one helper-only change: getDeliveredNotifications seed,

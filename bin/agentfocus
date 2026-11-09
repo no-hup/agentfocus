@@ -117,16 +117,32 @@ function focusSession(data, exactOnly) {
         // Panel-exact routing needs a vendor API; this is the accepted best-effort.
         const editor = /^[A-Za-z0-9 ._-]+$/.test(String(data.editor_app || '')) ? data.editor_app : null;
         if (editor && data.cwd) {
-            let folder = null;
+            let ew = null, folder = null, suppressed = null;
             try {
-                folder = require(path.join(ADAPTERS_DIR, 'editor_window.js')).openWindowFor(editor, data.cwd);
+                ew = require(path.join(ADAPTERS_DIR, 'editor_window.js'));
+                folder = ew.openWindowFor(editor, data.cwd);
             } catch(e) {}  // install predating the verifier → degrade, never guess
             if (!folder && exactOnly) return false;   // let focus-next try elsewhere first
             try {
                 // `folder` is the editor's OWN path string, so its already-open
                 // check matches it exactly: a pure raise, never a second window.
-                if (folder) execFileSync('open', ['-a', editor, folder]);
-                else execFileSync('osascript', ['-e', `tell application ${JSON.stringify(editor)} to activate`]);
+                // But two raises landing together are worse than either alone — the
+                // editor merges them into one untitled workspace and BOTH windows
+                // are gone — so raiseWindow() may decline. Degrade to activate then:
+                // activate opens no path, so it can never join that batch.
+                // ADAPTERS_DIR is always the INSTALLED tree, never the one this
+                // script sits in, so a CLI newer than ~/.local/share/agentfocus is
+                // a reachable state — and calling straight through crashed focus
+                // entirely rather than degrading. Same rule as the require above:
+                // an install predating the check degrades, it never guesses.
+                const canRaise = ew && typeof ew.raiseWindow === 'function';
+                if (folder && !(canRaise && ew.raiseWindow(editor, folder))) {
+                    folder = null;
+                    suppressed = canRaise
+                        ? 'another window raise within the merge window'
+                        : 'installed adapters predate the raise gap — run `agentfocus init`';
+                }
+                if (!folder) execFileSync('osascript', ['-e', `tell application ${JSON.stringify(editor)} to activate`]);
                 data.waiting = false;
                 data.ts = Date.now();
                 fs.writeFileSync(path.join(REGISTRY_DIR, `${data.session_id}.json`), JSON.stringify(data, null, 2), { mode: 0o600 });
@@ -135,12 +151,13 @@ function focusSession(data, exactOnly) {
                 // degraded activate a hit. `waiting` clears either way: a session
                 // whose folder is closed can never be reached, and leaving it
                 // waiting only leaves a banner that no click can clear.
+                const why = suppressed || `no open window for ${data.cwd}`;
                 logEvent('focus', data.session_id, editor, !!folder, folder
                     ? `window-level: ${folder}`
-                    : `degraded: activate only (no open window for ${data.cwd})`);
+                    : `degraded: activate only (${why})`);
                 console.log(folder
                     ? `Focused ${data.session_id} window-level in ${editor} (${folder})`
-                    : `Activated ${editor} for ${data.session_id} — no open window for ${data.cwd}`);
+                    : `Activated ${editor} for ${data.session_id} — ${why}`);
                 return true;
             } catch(e) {
                 logEvent('focus', data.session_id, editor, false, e.message);
